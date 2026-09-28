@@ -1,0 +1,23 @@
+{
+ "sternburg export": [
+  {"id": 101, "price": 9.99, "oldPrice": 11.99, "brand": {"name": "Sternburg"}, "product": {"name": "Export"}, "description": "je 20 x 0,5-l-Fl.-Kasten zzgl. 3,10 Pfand", "advertisers": [{"name": "Netto Marken-Discount"}], "validityDates": [{"from": "2026-09-28T00:00:00", "to": "2026-10-03T23:59:59"}]},
+  {"id": 102, "price": 6.49, "brand": {"name": "Sternburg"}, "product": {"name": "Export"}, "description": "je 24 x 0,33-l-Fl.", "advertisers": [{"name": "REWE"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]},
+  {"id": 103, "price": 10.49, "brand": {"name": "Sternburg"}, "product": {"name": "Pilsener"}, "description": "20 x 0,5 l", "advertisers": [{"name": "REWE"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]},
+  {"id": 104, "price": 10.99, "oldPrice": 12.49, "brand": {"name": "Sternburg"}, "product": {"name": "Export"}, "description": "20 x 0,5 l Kasten", "advertisers": [{"name": "REWE"}], "validityDates": [{"from": "2026-10-05", "to": "2026-10-10"}]}
+ ],
+ "red bull": [
+  {"id": 201, "price": 3.96, "oldPrice": 5.56, "brand": {"name": "Red Bull"}, "product": {"name": "Energy Drink"}, "description": "4 x 0,25-l-Dose zzgl. 1,00 Pfand", "advertisers": [{"name": "EDEKA"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]},
+  {"id": 202, "price": 0.99, "oldPrice": 1.39, "brand": {"name": "Red Bull"}, "product": {"name": "Energy Drink"}, "description": "0,25-l-Dose", "advertisers": [{"name": "Penny"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]},
+  {"id": 203, "price": 1.49, "brand": {"name": "Red Bull"}, "product": {"name": "Energy Drink"}, "description": "0,473-l-Dose", "advertisers": [{"name": "Kaufland"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]}
+ ],
+ "haribo goldbären": [
+  {"id": 301, "price": 0.89, "brand": {"name": "Haribo"}, "product": {"name": "Goldbären"}, "description": "175-g-Btl.", "advertisers": [{"name": "Lidl"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]},
+  {"id": 302, "price": 0.99, "oldPrice": 1.29, "brand": {"name": "Haribo"}, "product": {"name": "Goldbaeren"}, "description": "200-g-Beutel", "advertisers": [{"name": "Kaufland"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]}
+ ],
+ "jägermeister": [
+  {"id": 401, "price": 10.49, "oldPrice": 12.99, "brand": {"name": "Jägermeister"}, "product": {"name": "Kräuterlikör"}, "description": "35 % Vol., 0,7-l-Fl.", "advertisers": [{"name": "Metro"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]}
+ ],
+ "astra rotlicht": [
+  {"id": 501, "price": 0.79, "brand": {"name": "Astra"}, "product": {"name": "Rotlicht"}, "description": "0,33-l-Dose", "advertisers": [{"name": "Hit"}], "validityDates": [{"from": "2026-09-28", "to": "2026-10-03"}]}
+ ]
+}

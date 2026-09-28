@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CornerstoreAI</title>
+<meta name="theme-color" content="#3b2fd6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="CornerstoreAI">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>🏪 CornerstoreAI</h1>
+    <div class="topbar" id="topbar">
+      <button class="icon-btn" style="justify-self:start" onclick="openMenu(true)" aria-label="Menü öffnen" title="Menü">☰</button>
+      <button class="icon-btn" style="justify-self:center" onclick="refreshPrices()" aria-label="Preise neu laden" title="Preise neu laden">↻</button>
+      <label class="vatgroup" style="justify-self:end">Brutto
+        <span class="switch"><input type="checkbox" id="vatSwitch" onchange="toggleNet()" aria-label="Brutto- oder Nettopreise anzeigen"><span class="slider-track"><span class="slider-thumb"></span></span></span>
+        Netto</label>
+    </div>
+    <div class="lastrun" id="lastrun"></div>
+  </header>
+<main>
+  <nav id="nav"></nav>
+  <div id="app"><p class="loading">Lädt …</p></div>
+</main>
+<div id="toast" role="status"></div>
+<div id="selbar"></div>
+<div id="menuOverlay" onclick="openMenu(false)"></div>
+<aside id="menu" aria-label="Menü" aria-hidden="true">
+  <div class="menu-head"><div class="avatar" id="menuAvatar">?</div><div><b id="menuShop">Mein Späti</b><div class="sub" style="margin:0" id="menuMail"></div></div></div>
+  <button class="menu-item" onclick="openPage('konto')"><span class="ic">👤</span>Kontodaten</button>
+  <button class="menu-item" onclick="openPage('laden')"><span class="ic">🏪</span>Mein Laden</button>
+  <button class="menu-item" onclick="openPage('benachrichtigungen')"><span class="ic">🔔</span>Benachrichtigungen</button>
+  <button class="menu-item" onclick="openPage('einstellungen')"><span class="ic">⚙️</span>Einstellungen</button>
+  <div class="menu-sep"></div>
+  <button class="menu-item" onclick="openPage('support')"><span class="ic">💬</span>Hilfe &amp; Support</button>
+  <button class="menu-item" onclick="openPage('rechtliches')"><span class="ic">📄</span>Datenschutz &amp; Impressum</button>
+  <div class="menu-sep"></div>
+  <button class="menu-item danger" onclick="logout()"><span class="ic">🚪</span>Abmelden</button>
+</aside>
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="app.js"></script>
+</body>
+</html>

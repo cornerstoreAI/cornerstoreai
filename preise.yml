@@ -1,0 +1,31 @@
+# Holt jeden Morgen automatisch die aktuellen Supermarkt-Angebote.
+# Manuell starten: GitHub → Reiter "Actions" → "Preise abrufen" → "Run workflow".
+name: Preise abrufen
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # täglich ca. 5:17 Uhr deutscher Sommerzeit (3:17 UTC)
+  workflow_dispatch:        # Knopf zum manuellen Starten
+
+permissions:
+  contents: read
+  actions: write            # nötig, damit GitHub die tägliche Automatik nicht einschlafen lässt
+
+jobs:
+  preise:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r collector/requirements.txt
+      - name: Angebote abrufen und speichern
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python collector/collect.py
+      # GitHub pausiert zeitgesteuerte Abläufe nach 60 Tagen ohne Änderungen am Projekt.
+      # Dieser Schritt verhindert das.
+      - uses: liskin/gh-workflow-keepalive@v1
