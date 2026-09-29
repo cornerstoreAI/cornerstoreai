@@ -177,3 +177,9 @@ nav#nav button.on{color:var(--accent);background:var(--surface2)}
 .pset{display:grid;grid-template-columns:1fr 90px;gap:6px;margin-top:6px}
 .pset input,.pset select{width:100%}
 .hidden{display:none!important}
+.searchbar.quick{position:relative;margin-bottom:10px}
+.searchbar.quick input{width:100%;border:0;border-radius:10px;padding:11px 38px 11px 40px;box-shadow:var(--shadow);background:var(--surface);font-size:.95rem}
+.searchbar.quick input::-webkit-search-cancel-button{display:none}
+.searchbar.quick .qicon{position:absolute;left:13px;top:50%;transform:translateY(-50%);font-size:.95rem;opacity:.6;pointer-events:none}
+.searchbar.quick .qclear{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--mute);padding:6px 8px;font-size:.9rem}
+main{min-height:calc(100vh - 150px)}

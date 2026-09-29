@@ -43,8 +43,9 @@ const configured = CFG.SUPABASE_URL && !/HIER_/.test(CFG.SUPABASE_URL) && CFG.SU
 const sb = configured && window.supabase ? window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_KEY) : null;
 
 let S = { user: null, profile: null, products: [], vendorsRaw: [], vprices: [], retailRows: [], history: [], cart: [], lastRun: null, loaded: false };
-let products = [], vendors = [], RETAIL = [], R = {}, cart = [];
-let tab = 'dash', prevTab = 'dash', q = '', catFilter = [], dashProd = [], dashSearch = '', dealerFilter = [], week = 0, filterOpen = false, selected = [];
+let products = [], vendors = [], RETAIL = [], R = {}, cart = [], wcart = [];
+let cartMode = 'einkauf', orderVendor = null, orderSent = false;
+let tab = 'dash', prevTab = 'dash', q = '', quick = '', catFilter = [], dashProd = [], dashSearch = '', dealerFilter = [], week = 0, filterOpen = false, selected = [];
 let authEmail = '', addOpen = false, bulkOpen = false, chartRange = 'month', authMode = 'login', authMsg = '', noteOpen = new Set(), scannedEan = null;
 
 /* ---------- Supabase: Laden ---------- */
@@ -77,17 +78,20 @@ async function loadAll() {
 function buildIndex() {
   RETAIL = S.profile?.retailers || [];
   products = S.products.map(p => ({ id: p.id, name: p.name, unit: p.unit, cat: p.category, ean: p.ean, search_term: p.search_term, vat: +p.vat_rate || 19 }));
-  vendors = S.vendorsRaw.map(v => ({ id: v.id, name: v.name, net: v.prices_net, prices: {} }));
+  vendors = S.vendorsRaw.map(v => ({ id: v.id, name: v.name, net: v.prices_net, contact: v.contact_name || '', email: v.email || '', phone: v.phone || '', customer_no: v.customer_no || '', prices: {} }));
   for (const x of S.vprices) { const v = vendors.find(v => v.id === x.vendor_id); if (v) v.prices[x.product_id] = +x.price; }
   R = {};
   for (const r of S.retailRows) {
-    const e = ((R[r.product_id] = R[r.product_id] || {})[r.retailer] = R[r.product_id][r.retailer] || { regular: null, regularMg: null, deals: [], auto: [] });
+    const e = ((R[r.product_id] = R[r.product_id] || {})[r.retailer] = R[r.product_id][r.retailer] || { regular: null, regularMg: null, regularOp: null, deals: [], auto: [] });
     if (r.ext_key === 'regular') e.regular = r;
     else if (r.ext_key === 'regular-mg') e.regularMg = r;
+    else if (r.ext_key === 'regular-op') e.regularOp = r;
     else if (r.ext_key.startsWith('deal:')) e.deals.push(r);
     else e.auto.push(r);
   }
-  cart = S.cart.map(c => ({ pid: c.product_id, qty: c.qty || '', note: c.note || '', checked: c.checked }));
+  const toItem = c => ({ pid: c.product_id, qty: c.qty || '', note: c.note || '', checked: c.checked });
+  cart = S.cart.filter(c => (c.list || 'einkauf') === 'einkauf').map(toItem);
+  wcart = S.cart.filter(c => c.list === 'grosshandel').map(toItem);
   dealerFilter = dealerFilter.filter(d => dealerList().includes(d));
 }
 const prod = id => products.find(p => p.id === id);
@@ -98,8 +102,22 @@ function retailEntry(pid, r, w) {
   const { from, to } = weekRange(w);
   const cands = [...e.deals.filter(d => d.ext_key === 'deal:' + from), ...e.auto.filter(a => !a.hidden && (a.valid_from || from) <= to && (a.valid_to || to) >= from)];
   const deal = cands.sort((a, b) => a.price - b.price)[0] || null;
-  const regular = e.regular ? +e.regular.price : e.regularMg ? +e.regularMg.price : null;
-  return { regular, deal };
+  const auto = autoRegular(e);
+  const regular = e.regular ? +e.regular.price : auto ? +auto.price : null;
+  return { regular, deal, regularRow: e.regular || auto };
+}
+// Automatisch bekannter Normalpreis: die jüngere Angabe aus Open Prices (Meldedatum) oder dem Prospekt-Streichpreis
+function autoRegular(e) {
+  const op = e.regularOp, mg = e.regularMg;
+  if (op && mg) return (op.valid_from || '') >= (mg.fetched_at || '').slice(0, 10) ? op : mg;
+  return op || mg || null;
+}
+function srcLabel(r) {
+  if (!r) return '';
+  if (r.source === 'openprices') return r.title || 'Open Prices';
+  if (r.ext_key === 'regular-mg') return 'Streichpreis aus Prospekt vom ' + deDate(r.fetched_at);
+  if (r.source === 'manuell') return r.is_offer ? 'Angebot, von dir eingetragen' : 'Normalpreis, von dir eingetragen';
+  return r.title || '';
 }
 function vendorGross(v, p) { const n = v.prices[p.id]; if (n == null) return null; return v.net ? n * (1 + p.vat / 100) : n; }
 function allOffers(pid, w = week) {
@@ -109,7 +127,7 @@ function allOffers(pid, w = week) {
     const e = retailEntry(pid, r, w); if (!e) continue;
     const price = e.deal ? +e.deal.price : e.regular; if (!(price > 0)) continue;
     const normal = e.deal ? (e.deal.regular_price != null ? +e.deal.regular_price : e.regular) : null;
-    o.push({ name: r, price, deal: !!e.deal, normal, kind: 'retail', row: e.deal });
+    o.push({ name: r, price, deal: !!e.deal, normal, kind: 'retail', row: e.deal || e.regularRow });
   }
   for (const v of vendors) {
     if (dealerFilter.length && !dealerFilter.includes(v.name)) continue;
@@ -119,7 +137,7 @@ function allOffers(pid, w = week) {
 }
 function catList() { return [...new Set(products.map(p => p.cat))].sort(); }
 function dealerList() { return [...RETAIL, ...vendors.map(v => v.name)]; }
-function fp() { return products.filter(p => (!catFilter.length || catFilter.includes(p.cat)) && (!dashProd.length || dashProd.includes(p.id))); }
+function fp() { const qs = quick.trim().toLowerCase(); return products.filter(p => (!qs || p.name.toLowerCase().includes(qs)) && (!catFilter.length || catFilter.includes(p.cat)) && (!dashProd.length || dashProd.includes(p.id))); }
 function visible() { return products.filter(p => (!q || p.name.toLowerCase().includes(q.toLowerCase())) && (!catFilter.length || catFilter.includes(p.cat))); }
 
 /* ---------- Aktionen mit Fehlerbehandlung ---------- */
@@ -199,7 +217,7 @@ function render() {
   $('#menuShop').textContent = S.profile.shop_name || 'Mein Späti';
   $('#menuMail').textContent = S.user.email || '';
   const tabs = [['dash', '🏠', 'Dashboard'], ['cart', '🛒', 'Einkaufsliste'], ['products', '📦', 'Produkte'], ['vendors', '🏬', 'Händler']];
-  $('#nav').innerHTML = tabs.map(([k, ic, l]) => `<button class="${tab === k ? 'on' : ''}" onclick="go('${k}')"><span class="ic">${ic}</span>${l}${k === 'cart' && cart.length ? `<span class="navbadge">${cart.length}</span>` : ''}</button>`).join('');
+  $('#nav').innerHTML = tabs.map(([k, ic, l]) => `<button class="${tab === k ? 'on' : ''}" onclick="go('${k}')"><span class="ic">${ic}</span>${l}${k === 'cart' && cart.length + wcart.length ? `<span class="navbadge">${cart.length + wcart.length}</span>` : ''}</button>`).join('');
   $('#app').innerHTML = tab.startsWith('page:') ? pageView(tab.slice(5)) : tab === 'dash' ? dash() : tab === 'cart' ? cartView() : tab === 'products' ? productsView() : vendorsView();
   updateSelBar();
 }
@@ -216,7 +234,7 @@ function filterBox() {
   const n = catFilter.length + dashProd.length + dealerFilter.length;
   const pl = products.filter(x => !sq || x.name.toLowerCase().includes(sq));
   const chip = (on, fn, t) => `<button type="button" class="chip ${on ? 'on' : ''}" onclick="${fn}">${t}</button>`;
-  return `<details class="filterbox" ${filterOpen ? 'open' : ''} ontoggle="filterOpen=this.open">
+  return `${searchBar()}<details class="filterbox" ${filterOpen ? 'open' : ''} ontoggle="filterOpen=this.open">
   <summary><span>Filter</span><span class="row"><span class="pillsm">${week ? 'Nächste' : 'Diese'} Woche</span>${n ? `<span class="badge">${n}</span>` : ''}</span></summary>
   <div class="panel">
     <div class="filter-section"><h4>🗓️ Zeitraum</h4><div class="seg">${chip(week === 0, 'week=0;render()', 'Diese Woche')}${chip(week === 1, 'week=1;render()', 'Nächste Woche')}</div><p class="sub">KW ${wi.kw} · ${wi.range}</p></div>
@@ -228,6 +246,10 @@ function filterBox() {
     ${n ? `<button type="button" class="ghost sm" style="margin-top:12px" onclick="catFilter=[];dashProd=[];dealerFilter=[];render()">Filter zurücksetzen</button>` : ''}
   </div></details>`;
 }
+function searchBar() {
+  return `<div class="searchbar quick"><span class="qicon" aria-hidden="true">🔍</span><input id="qsearch" type="search" placeholder="Produkt suchen…" aria-label="Produkt suchen" value="${esc(quick)}" oninput="onQSearch(this.value)">${quick ? `<button type="button" class="qclear" onclick="onQSearch('')" aria-label="Suche leeren">✕</button>` : ''}</div>`;
+}
+function onQSearch(v) { quick = v; render(); const i = $('#qsearch'); if (i) { i.focus(); const l = i.value.length; i.setSelectionRange && i.setSelectionRange(l, l); } }
 function toggleCat(i) { catFilter = toggleIn(catFilter, catList()[i]); render(); }
 function toggleDealer(i) { dealerFilter = toggleIn(dealerFilter, dealerList()[i]); render(); }
 function toggleDashProd(id) { dashProd = toggleIn(dashProd, id); render(); }
@@ -278,7 +300,7 @@ function pcard(p, offers) {
   if (!offers.length) return `<div ${at}><div class="prow">${head}<span class="muted small">Noch keine Preise</span></div></div>`;
   const top = offers[0], min = top.price, max = offers[offers.length - 1].price, save = offers.length > 1 ? offers[1].price - min : 0;
   return `<div ${at}><div class="prow">${head}<div class="rec"><div class="price">${fmt(top.price, p.vat)}</div><div class="pmeta">🏆 ${esc(top.name)}</div>${save > 0.004 ? `<span class="tag">spart ${fmt(save, p.vat)} ggü. Nr. 2</span>` : ''}</div></div>
-  <div class="bars">${offers.map(o => `<div class="bar-row" title="${esc(o.row?.title || '')}"><span class="src">${o.deal ? '🔥 ' : ''}${esc(o.name)}</span><span class="bar-track"><span class="bar-fill" style="width:${max > 0 ? (o.price / max * 100).toFixed(0) : 0}%;background:${priceColor(o.price, min, max)}"></span></span><span class="p">${fmt(o.price, p.vat)}</span></div>`).join('')}</div></div>`;
+  <div class="bars">${offers.map(o => `<div class="bar-row" title="${esc(srcLabel(o.row))}"><span class="src">${o.deal ? '🔥 ' : ''}${esc(o.name)}</span><span class="bar-track"><span class="bar-fill" style="width:${max > 0 ? (o.price / max * 100).toFixed(0) : 0}%;background:${priceColor(o.price, min, max)}"></span></span><span class="p">${fmt(o.price, p.vat)}</span></div>`).join('')}</div></div>`;
 }
 
 /* ---------- Preisverlauf (echte Daten aus price_history) ---------- */
@@ -378,16 +400,22 @@ function priceDropdown(p) {
       <div class="vgrid4 hd"><span></span><span>Regulär</span><span>Diese Wo.</span><span>Nächste Wo.</span></div>
       ${RETAIL.map((r, i) => { const e = R[p.id]?.[r] || {}; const d0 = (e.deals || []).find(d => d.ext_key === 'deal:' + w0), d1 = (e.deals || []).find(d => d.ext_key === 'deal:' + w1);
         return `<div class="vgrid4"><span class="muted">${esc(r)}</span>
-        <input inputmode="decimal" value="${e.regular ? e.regular.price : ''}" placeholder="${e.regularMg ? String(e.regularMg.price).replace('.', ',') : '—'}" aria-label="Normalpreis ${esc(r)}" onchange="setRetail(${p.id},${i},this.value)">
+        <input inputmode="decimal" value="${e.regular ? e.regular.price : ''}" placeholder="${autoRegular(e) ? String(autoRegular(e).price).replace('.', ',') : '—'}" aria-label="Normalpreis ${esc(r)}" onchange="setRetail(${p.id},${i},this.value)">
         <input inputmode="decimal" placeholder="—" value="${d0 ? d0.price : ''}" aria-label="Angebot diese Woche ${esc(r)}" onchange="setDeal(${p.id},${i},0,this.value)">
         <input inputmode="decimal" placeholder="—" value="${d1 ? d1.price : ''}" aria-label="Angebot nächste Woche ${esc(r)}" onchange="setDeal(${p.id},${i},1,this.value)"></div>`; }).join('')}
-      <p class="sub small" style="margin:4px 0 0">Graue Werte = zuletzt automatisch gesehener Normalpreis. Alles brutto pro ${esc(p.unit)}.</p>
+      <p class="sub small" style="margin:4px 0 0">Graue Werte = automatisch gefundener Normalpreis. Ein eigener Wert hat immer Vorrang. Alles brutto pro ${esc(p.unit)}.</p>
+    </div>
+    <div class="pricegrp"><h3>🌍 Gemeldete Normalpreise (Open Prices)</h3>
+      ${(() => { const ops = RETAIL.map(r => R[p.id]?.[r]?.regularOp).filter(Boolean);
+        if (ops.length) return ops.map(o => `<div class="offerline"><span class="t"><b>${esc(o.retailer)}</b> ${fmt(o.price, p.vat)} · ${deDate(o.valid_from)}<br><span class="small">${esc(o.title || '')}</span></span></div>`).join('') + '<p class="sub small" style="margin:4px 0 0">Quelle: <a href="https://prices.openfoodfacts.org" target="_blank" rel="noopener">Open Prices</a> von Open Food Facts, Lizenz ODbL.</p>';
+        return `<p class="sub" style="margin:0">${p.ean ? 'Für diesen Barcode wurde in den letzten 6 Monaten noch kein Preis bei deinen Supermärkten gemeldet.' : 'Trag unten den Barcode (EAN) ein oder scanne das Produkt neu – dann sucht die App auch gemeldete Normalpreise.'}</p>`; })()}
     </div>
     <div class="pricegrp"><h3>📦 Großhändler &amp; Vertragspartner</h3>
       ${vendors.length ? vendors.map(v => `<div class="vgrid"><span class="muted">${esc(v.name)} <span class="small">(${v.net ? 'netto' : 'brutto'})</span></span>
         <input inputmode="decimal" placeholder="—" value="${v.prices[p.id] ?? ''}" aria-label="Preis ${esc(v.name)}" onchange="setVendorPrice(${v.id},${p.id},this.value)"><span></span></div>`).join('') : '<p class="muted">Noch keine Großhändler angelegt (Reiter „Händler“).</p>'}
     </div>
     <div class="pricegrp"><h3>⚙️ Produkt-Einstellungen</h3>
+      <div class="pset" style="grid-template-columns:1fr"><input value="${esc(p.ean || '')}" inputmode="numeric" placeholder="Barcode / EAN (optional)" aria-label="Barcode" onchange="setProd(${p.id},'ean',this.value.replace(/\\D/g,''))"></div>
       <div class="pset"><input value="${esc(p.search_term || '')}" placeholder="Suchbegriff (optional, z. B. Sternburg Export)" aria-label="Suchbegriff" onchange="setProd(${p.id},'search_term',this.value)">
       <select aria-label="Mehrwertsteuer" onchange="setProd(${p.id},'vat_rate',this.value)"><option value="19" ${p.vat === 19 ? 'selected' : ''}>19 %</option><option value="7" ${p.vat === 7 ? 'selected' : ''}>7 %</option></select></div>
       <p class="sub small" style="margin:4px 0 0">Der Suchbegriff hilft, wenn die automatische Suche nichts oder das Falsche findet.</p>
@@ -493,6 +521,15 @@ function vendorsView() {
   <form onsubmit="addVendor(event)" class="row" style="margin-bottom:14px"><input name="n" placeholder="Name des Händlers" required><button>Hinzufügen</button></form>
   <div class="gap-list">${vendors.map(v => `<div class="pcard"><div class="row between"><b>${esc(v.name)}</b><button class="ghost sm" onclick="delVendor(${v.id})">Entfernen</button></div>
     <label class="row" style="margin-top:6px;font-size:.85rem"><input type="checkbox" ${v.net ? 'checked' : ''} onchange="setVendorNet(${v.id},this.checked)"> Preise sind netto (ohne MwSt.)</label>
+    <details class="pricedrop" ${v.email || v.phone ? '' : 'open'}><summary>Kontakt für Bestellungen${v.email || v.phone ? ' · ' + esc([v.email, v.phone].filter(Boolean).join(' · ')) : ''}</summary>
+      <div class="pset" style="grid-template-columns:1fr 1fr;margin-top:8px">
+        <input value="${esc(v.contact)}" placeholder="Ansprechpartner" aria-label="Ansprechpartner" onchange="setVendorField(${v.id},'contact_name',this.value)">
+        <input value="${esc(v.customer_no)}" placeholder="Deine Kundennummer" aria-label="Kundennummer" onchange="setVendorField(${v.id},'customer_no',this.value)">
+        <input type="email" value="${esc(v.email)}" placeholder="E-Mail" aria-label="E-Mail des Händlers" onchange="setVendorField(${v.id},'email',this.value)">
+        <input type="tel" value="${esc(v.phone)}" placeholder="Handy (WhatsApp/SMS)" aria-label="Handynummer des Händlers" onchange="setVendorField(${v.id},'phone',this.value)">
+      </div>
+      <p class="sub small" style="margin:4px 0 0">Damit kannst du im Reiter „Einkaufsliste“ → „Großhändler“ deine Bestellung direkt per E-Mail, WhatsApp oder SMS schicken.</p>
+    </details>
     <div class="pricegrp"><h3>Preise pro Artikel</h3>
       ${products.length ? products.map(p => `<div class="vgrid"><span class="muted">${esc(p.name)}</span>
         <input inputmode="decimal" placeholder="—" value="${v.prices[p.id] ?? ''}" aria-label="Preis ${esc(p.name)} bei ${esc(v.name)}" onchange="setVendorPrice(${v.id},${p.id},this.value)">
@@ -521,6 +558,7 @@ async function delRetailer(i) {
 }
 async function addVendor(e) { e.preventDefault(); const n = e.target.n.value.trim(); await act(() => must(sb.from('vendors').insert({ name: n })), 'Händler hinzugefügt'); }
 async function delVendor(id) { if (!confirm('Händler wirklich entfernen?')) return; await act(() => must(sb.from('vendors').delete().eq('id', id)), 'Händler entfernt'); }
+async function setVendorField(id, field, v) { await act(() => must(sb.from('vendors').update({ [field]: v.trim() || null }).eq('id', id)), 'Gespeichert'); }
 async function setVendorNet(id, net) { await act(() => must(sb.from('vendors').update({ prices_net: net }).eq('id', id))); }
 async function setVendorPrice(vid, pid, v) {
   const n = toNum(v);
@@ -538,33 +576,46 @@ async function importVendorBulk(vid) {
 }
 function importVendorFile(e, vid) { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { const ta = $('#vbulk' + vid); if (ta) { ta.value = r.result; importVendorBulk(vid); } }; r.readAsText(f); }
 
-/* ---------- Auswahl + Einkaufsliste ---------- */
+/* ---------- Auswahl + Einkaufslisten ----------
+   Zwei Listen: 'einkauf' (Supermarkt, zum Abhaken) und 'grosshandel' (Bestellung, wird an den Händler geschickt) */
 function cardClick(e, id) { if (e.target && e.target.closest && e.target.closest('input,button,summary,label,select,textarea,a,details')) return; toggleSelect(id); }
 function toggleSelect(id) { selected = toggleIn(selected, id); document.querySelectorAll('[data-pid="' + id + '"]').forEach(el => el.classList.toggle('sel', selected.includes(id))); updateSelBar(); }
 function updateSelBar() {
   const b = $('#selbar'); if (!b) return;
   if (!selected.length || !S.user) { b.classList.remove('show'); b.innerHTML = ''; return; }
   b.classList.add('show');
-  b.innerHTML = `<span class="selcount">🛒 ${selected.length} ausgewählt</span><span class="row"><button onclick="addSelectedToCart()">Zur Einkaufsliste</button><button class="ghost" onclick="clearSel()" aria-label="Auswahl aufheben">✕</button></span>`;
+  b.innerHTML = `<span class="selcount">${selected.length} ausgewählt</span><span class="row"><button onclick="addSelectedToCart('einkauf')">🛒 Einkaufsliste</button><button onclick="addSelectedToCart('grosshandel')">📦 Bestellung</button><button class="ghost" onclick="clearSel()" aria-label="Auswahl aufheben">✕</button></span>`;
 }
 function clearSel() { selected = []; render(); }
-async function addSelectedToCart() {
-  const ids = selected.filter(id => !cart.some(c => c.pid === id)); selected = [];
-  await act(() => ids.length ? must(sb.from('cart_items').insert(ids.map(id => ({ product_id: id })))) : Promise.resolve(), '🛒 ' + ids.length + (ids.length === 1 ? ' Produkt' : ' Produkte') + ' zur Einkaufsliste hinzugefügt');
+const listOf = L => L === 'grosshandel' ? wcart : cart;
+async function addToList(ids, L) {
+  ids = ids.filter(id => !listOf(L).some(c => c.pid === id));
+  await act(() => ids.length ? must(sb.from('cart_items').insert(ids.map(id => ({ product_id: id, list: L })))) : Promise.resolve(),
+    ids.length + (ids.length === 1 ? ' Produkt' : ' Produkte') + (L === 'grosshandel' ? ' zur Großhändler-Bestellung' : ' zur Einkaufsliste') + ' hinzugefügt');
 }
-const cartUpd = (id, patch) => must(sb.from('cart_items').update(patch).match({ user_id: S.user.id, product_id: id }));
-async function toggleCheck(id) { const c = S.cart.find(c => c.product_id === id); c.checked = !c.checked; buildIndex(); render(); try { await cartUpd(id, { checked: c.checked }); } catch (e) { toast('⚠️ ' + e.message); } }
-async function setQty(id, v) { await act(() => cartUpd(id, { qty: v })); }
+async function addSelectedToCart(L = 'einkauf') { const ids = selected; selected = []; await addToList(ids, L); }
+const cartUpd = (id, L, patch) => must(sb.from('cart_items').update(patch).match({ user_id: S.user.id, product_id: id, list: L }));
+const rawItem = (id, L) => S.cart.find(c => c.product_id === id && (c.list || 'einkauf') === L);
+async function toggleCheck(id, L = 'einkauf') { const c = rawItem(id, L); c.checked = !c.checked; buildIndex(); render(); try { await cartUpd(id, L, { checked: c.checked }); } catch (e) { toast('⚠️ ' + e.message); } }
+async function setQty(id, v, L = 'einkauf') { await act(() => cartUpd(id, L, { qty: v })); }
 let noteTimers = {};
-function setNote(id, v) { const c = S.cart.find(c => c.product_id === id); c.note = v; clearTimeout(noteTimers[id]); noteTimers[id] = setTimeout(() => cartUpd(id, { note: v }).catch(e => toast('⚠️ ' + e.message)), 600); }
-function toggleNote(id) { noteOpen.has(id) ? noteOpen.delete(id) : noteOpen.add(id); buildIndex(); render(); const t = $('#note' + id); t && t.focus(); }
-async function rmCart(id) { await act(() => must(sb.from('cart_items').delete().match({ user_id: S.user.id, product_id: id }))); }
-async function clearDone() { await act(() => must(sb.from('cart_items').delete().match({ user_id: S.user.id, checked: true }))); }
+function setNote(id, v, L = 'einkauf') { const c = rawItem(id, L); c.note = v; clearTimeout(noteTimers[L + id]); noteTimers[L + id] = setTimeout(() => cartUpd(id, L, { note: v }).catch(e => toast('⚠️ ' + e.message)), 600); }
+function toggleNote(id, L = 'einkauf') { const k = L + id; noteOpen.has(k) ? noteOpen.delete(k) : noteOpen.add(k); buildIndex(); render(); const t = $('#note' + k); t && t.focus(); }
+async function rmCart(id, L = 'einkauf') { await act(() => must(sb.from('cart_items').delete().match({ user_id: S.user.id, product_id: id, list: L }))); }
+async function clearDone() { await act(() => must(sb.from('cart_items').delete().match({ user_id: S.user.id, checked: true, list: 'einkauf' }))); }
+async function clearOrder() { if (!confirm('Bestellung wirklich leeren?')) return; await act(() => must(sb.from('cart_items').delete().match({ user_id: S.user.id, list: 'grosshandel' })), 'Bestellung geleert'); }
+
 function cartView() {
+  const seg = `<div class="seg" style="margin-bottom:14px">
+    <button type="button" class="chip ${cartMode === 'einkauf' ? 'on' : ''}" onclick="cartMode='einkauf';render()">🛒 Einkaufsliste${cart.length ? ` (${cart.length})` : ''}</button>
+    <button type="button" class="chip ${cartMode === 'grosshandel' ? 'on' : ''}" onclick="cartMode='grosshandel';render()">📦 Großhändler${wcart.length ? ` (${wcart.length})` : ''}</button></div>`;
+  return seg + (cartMode === 'grosshandel' ? orderView() : shopListView());
+}
+function shopListView() {
   const ids = fp().map(x => x.id), shown = cart.filter(c => ids.includes(c.pid));
   let total = 0; const done = shown.filter(c => c.checked).length;
   const rows = shown.map(c => {
-    const x = prod(c.pid), b = allOffers(x.id)[0], qn = toNum(c.qty);
+    const x = prod(c.pid), b = allOffers(x.id)[0], qn = toNum(c.qty), k = 'einkauf' + x.id;
     if (b) total += (qn > 0 ? qn : 1) * conv(b.price, x.vat);
     return `<div class="citem${c.checked ? ' done' : ''}" style="--cc:${catColor(x.cat)}"><div class="crow">
       <input type="checkbox" class="chk" ${c.checked ? 'checked' : ''} onchange="toggleCheck(${x.id})" aria-label="Abhaken">
@@ -572,15 +623,77 @@ function cartView() {
       <div class="cacts"><button type="button" class="iconbtn${c.note ? ' has' : ''}" onclick="toggleNote(${x.id})" aria-label="Kommentar">💬</button>
         <input class="qty" inputmode="decimal" placeholder="Menge" value="${esc(c.qty)}" onchange="setQty(${x.id},this.value)" aria-label="Menge">
         <button type="button" class="iconbtn" onclick="rmCart(${x.id})" aria-label="Entfernen">🗑️</button></div></div>
-      ${noteOpen.has(x.id) ? `<textarea id="note${x.id}" class="note" placeholder="Kommentar…" oninput="setNote(${x.id},this.value)">${esc(c.note)}</textarea>` : ''}</div>`;
+      ${noteOpen.has(k) ? `<textarea id="note${k}" class="note" placeholder="Kommentar…" oninput="setNote(${x.id},this.value)">${esc(c.note)}</textarea>` : ''}</div>`;
   }).join('');
   return `${filterBox()}
-  <section class="dash-block"><h2>🛒 Einkaufsliste</h2>
+  <section class="dash-block" style="margin-top:14px"><h2>🛒 Einkaufsliste</h2>
   ${cart.length ? `<div class="cartsum"><span>🧾 ${done}/${shown.length} abgehakt</span><b>ca. ${eur(total)}</b></div>
     ${rows || '<p class="muted">Keine Artikel für diese Filter.</p>'}
     ${cart.some(c => c.checked) ? '<button class="ghost sm" style="margin-top:10px" onclick="clearDone()">✔️ Abgehakte entfernen</button>' : ''}`
-    : '<p class="muted">Deine Einkaufsliste ist leer. Tippe im Dashboard oder unter „Produkte“ auf Artikel und dann oben auf „Zur Einkaufsliste“.</p>'}</section>`;
+    : '<p class="muted">Deine Einkaufsliste ist leer. Tippe im Dashboard oder unter „Produkte“ auf Artikel und dann oben auf „🛒 Einkaufsliste“.</p>'}</section>`;
 }
+
+/* ---------- Großhändler-Bestellung ---------- */
+function orderVendorObj() {
+  if (!vendors.length) return null;
+  let v = vendors.find(v => v.id === orderVendor);
+  if (!v) { v = vendors.find(v => v.email || v.phone) || vendors[0]; orderVendor = v.id; }
+  return v;
+}
+function waNumber(phone) {   // "0176 123 45 67" -> "491761234567" (für WhatsApp)
+  let d = String(phone || '').replace(/[^\d+]/g, '');
+  if (d.startsWith('+')) d = d.slice(1); else if (d.startsWith('00')) d = d.slice(2); else if (d.startsWith('0')) d = '49' + d.slice(1);
+  return d;
+}
+function orderText(v) {
+  const P = S.profile, lines = wcart.map(c => { const x = prod(c.pid); return `- ${c.qty || '?'} × ${x.name} (${x.unit})${c.note ? ' – ' + c.note : ''}`; });
+  const addr = [P.street, [P.zip, P.city].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return [`Hallo${v.contact ? ' ' + v.contact : ''},`, '', `hiermit bestelle ich für ${P.shop_name || 'meinen Laden'}${v.customer_no ? ' (Kundennr. ' + v.customer_no + ')' : ''}:`, '',
+    ...lines, '', addr ? 'Lieferadresse: ' + addr : '', 'Bitte kurz bestätigen. Danke!', '', 'Viele Grüße', P.name || P.shop_name || ''].filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n').trim();
+}
+function orderView() {
+  const v = orderVendorObj();
+  if (!vendors.length) return `<section class="dash-block"><h2>📦 Großhändler-Bestellung</h2><p class="muted">Leg zuerst im Reiter „Händler“ einen Großhändler mit E-Mail oder Telefonnummer an.</p><button class="sm" onclick="go('vendors')">Zu den Händlern</button></section>`;
+  let total = 0, missing = 0;
+  const rows = wcart.map(c => {
+    const x = prod(c.pid), k = 'grosshandel' + x.id, qn = toNum(c.qty), vp = v.prices[x.id];
+    if (!(qn > 0)) missing++;
+    if (vp != null && qn > 0) total += qn * vp;
+    const best = allOffers(x.id)[0];
+    return `<div class="citem" style="--cc:${catColor(x.cat)}"><div class="crow">
+      <div class="cinfo"><div class="pname">${catEmoji(x.cat)} ${esc(x.name)}</div><div class="pmeta">${esc(x.unit)} · ${vp != null ? `${esc(v.name)}: ${eur(vp)} ${v.net ? 'netto' : 'brutto'}` : `kein Preis bei ${esc(v.name)}`}${best && best.name !== v.name ? ` · 🏆 ${esc(best.name)} ${fmt(best.price, x.vat)}` : ''}</div></div>
+      <div class="cacts"><button type="button" class="iconbtn${c.note ? ' has' : ''}" onclick="toggleNote(${x.id},'grosshandel')" aria-label="Hinweis">💬</button>
+        <input class="qty" inputmode="decimal" placeholder="Menge" value="${esc(c.qty)}" onchange="setQty(${x.id},this.value,'grosshandel')" aria-label="Menge" style="${qn > 0 ? '' : 'border-color:var(--hot)'}">
+        <button type="button" class="iconbtn" onclick="rmCart(${x.id},'grosshandel')" aria-label="Entfernen">🗑️</button></div></div>
+      ${noteOpen.has(k) ? `<textarea id="note${k}" class="note" placeholder="Hinweis für den Händler (z. B. Kasten statt Einzelflaschen)…" oninput="setNote(${x.id},this.value,'grosshandel')">${esc(c.note)}</textarea>` : ''}</div>`;
+  }).join('');
+  const notIn = products.filter(p => !wcart.some(c => c.pid === p.id));
+  const hasMail = !!v.email, hasPhone = !!v.phone, ready = wcart.length && !missing;
+  const btn = (ok, label, fn) => `<button type="button" ${ok && ready ? '' : 'disabled style="opacity:.45"'} onclick="${fn}">${label}</button>`;
+  return `<section class="dash-block"><h2>📦 Großhändler-Bestellung</h2>
+    <label class="field">Bestellen bei<select onchange="orderVendor=+this.value;render()">${vendors.map(x => `<option value="${x.id}" ${x.id === v.id ? 'selected' : ''}>${esc(x.name)}${x.email || x.phone ? '' : ' (keine Kontaktdaten)'}</option>`).join('')}</select></label>
+    <p class="sub" style="margin:-4px 0 10px">${hasMail || hasPhone ? `Senden an: ${[v.email && '✉️ ' + esc(v.email), v.phone && '📱 ' + esc(v.phone)].filter(Boolean).join(' · ')}` : `⚠️ Für ${esc(v.name)} sind keine Kontaktdaten hinterlegt. <a href="#" onclick="go('vendors');return false">Im Reiter „Händler“ eintragen</a>`}</p>
+    ${wcart.length ? `<div class="cartsum"><span>📦 ${wcart.length} Artikel${missing ? ` · ${missing} ohne Menge` : ''}</span><b>${total ? 'ca. ' + eur(total) + (v.net ? ' netto' : '') : ''}</b></div>${rows}` : '<p class="muted">Noch keine Artikel. Füg sie unten hinzu oder wähle im Dashboard Produkte aus und tippe oben auf „📦 Bestellung“.</p>'}
+    ${notIn.length ? `<div class="row" style="margin-top:10px;flex-wrap:nowrap"><select id="orderAdd" style="flex:1;min-width:0"><option value="">Artikel hinzufügen…</option>${notIn.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select><button type="button" class="sm" onclick="const s=$('#orderAdd');if(s.value)addToList([+s.value],'grosshandel')">＋</button></div>` : ''}
+    ${wcart.length ? `<h3 style="font-size:.85rem;color:var(--mute);margin:18px 0 6px">Vorschau der Nachricht</h3><pre class="pcard" style="white-space:pre-wrap;font:.85rem/1.45 var(--sans);margin:0;border-left:0">${esc(orderText(v))}</pre>
+    ${missing ? '<p class="err">Bitte bei allen Artikeln eine Menge eintragen.</p>' : ''}
+    <div class="row" style="margin-top:12px">${btn(hasMail, '✉️ E-Mail', 'sendOrder(\'mail\')')}${btn(hasPhone, '💬 WhatsApp', 'sendOrder(\'wa\')')}${btn(hasPhone, '📱 SMS', 'sendOrder(\'sms\')')}<button type="button" class="ghost" ${ready ? '' : 'disabled style="opacity:.45"'} onclick="copyOrder()">📋 Kopieren</button></div>
+    ${orderSent ? `<div class="banner" style="margin-top:14px"><p>Bestellung verschickt? Dann kannst du die Liste leeren.</p><button class="sm" onclick="orderSent=false;clearOrderNow()">✔️ Erledigt – Liste leeren</button></div>` : `<button class="ghost sm" style="margin-top:12px" onclick="clearOrder()">Liste leeren</button>`}` : ''}
+  </section>`;
+}
+function orderUrl(way) {
+  const v = orderVendorObj(), text = orderText(v), subj = `Bestellung ${S.profile.shop_name || ''} – ${new Date().toLocaleDateString('de-DE')}`.trim();
+  return way === 'mail' ? `mailto:${encodeURIComponent(v.email)}?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(text)}`
+    : way === 'wa' ? `https://wa.me/${waNumber(v.phone)}?text=${encodeURIComponent(text)}`
+    : `sms:${String(v.phone).replace(/[^\d+]/g, '')}?&body=${encodeURIComponent(text)}`;
+}
+function sendOrder(way) {
+  const url = orderUrl(way);
+  if (way === 'wa') window.open(url, '_blank'); else location.href = url;
+  orderSent = true; setTimeout(render, 300);
+}
+async function copyOrder() { try { await navigator.clipboard.writeText(orderText(orderVendorObj())); toast('📋 Bestellung kopiert'); } catch (e) { toast('Kopieren nicht möglich'); } }
+async function clearOrderNow() { await act(() => must(sb.from('cart_items').delete().match({ user_id: S.user.id, list: 'grosshandel' })), 'Bestellung erledigt'); }
 
 /* =====================================================================
    Menü + Unterseiten
@@ -593,6 +706,11 @@ async function saveForm(e) { e.preventDefault(); const patch = Object.fromEntrie
 async function changePw(e) {
   e.preventDefault(); const pw = e.target.pw.value;
   await act(async () => { const { error } = await sb.auth.updateUser({ password: pw }); if (error) throw error; e.target.reset(); }, '✅ Passwort geändert');
+}
+async function setNotifyEnabled(on) {
+  if (on && 'Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch (e) { /* ältere Browser */ } }
+  const blocked = on && 'Notification' in window && Notification.permission === 'denied';
+  await saveProfile({ notify: { ...S.profile.notify, enabled: on } }, on ? (blocked ? '⚠️ Eingeschaltet – aber dein Browser blockiert Mitteilungen. Bitte in den Browser-Einstellungen erlauben.' : '🔔 Benachrichtigungen eingeschaltet') : '🔕 Benachrichtigungen ausgeschaltet');
 }
 async function setNotify(k, v) { await saveProfile({ notify: { ...S.profile.notify, [k]: v } }); }
 function pageView(p) {
@@ -608,17 +726,20 @@ function pageView(p) {
     <p class="sub" style="margin:0 0 10px">Mit der Postleitzahl sucht die App jeden Morgen die Prospekt-Angebote der Supermärkte in deiner Nähe.</p>
     <button>Speichern</button></form>`;
   if (p === 'benachrichtigungen') {
-    const n = S.profile.notify || {}, t = (k, l, d) => `<label class="row between" style="padding:8px 0;border-bottom:1px dashed var(--line)"><span><b style="font-weight:600">${l}</b><br><span class="sub">${d}</span></span><input type="checkbox" class="chk" ${n[k] ? 'checked' : ''} onchange="setNotify('${k}',this.checked)"></label>`;
-    return head('🔔 Benachrichtigungen') + `<div class="pcard">${t('deals', 'Neue Top-Angebote', 'Wenn ein Angebot günstiger ist als dein Großhändler')}${t('drops', 'Preissenkungen', 'Wenn ein Produkt deutlich billiger wird')}${t('weekly', 'Wochenübersicht', 'Jeden Montag die Angebote der Woche')}
+    const n = S.profile.notify || {}, on = !!n.enabled, t = (k, l, d) => `<label class="row between" style="flex-wrap:nowrap;gap:12px;padding:8px 0;border-bottom:1px dashed var(--line);${on ? '' : 'opacity:.45'}"><span><b style="font-weight:600">${l}</b><br><span class="sub">${d}</span></span><input type="checkbox" class="chk" ${n[k] ? 'checked' : ''} ${on ? '' : 'disabled'} onchange="setNotify('${k}',this.checked)"></label>`;
+    return head('🔔 Benachrichtigungen') + (on ? '' : `<div class="banner"><p>🔕 Benachrichtigungen sind ausgeschaltet.</p><button class="sm" onclick="openPage('einstellungen')">In den Einstellungen einschalten</button></div>`) + `<div class="pcard">${t('deals', 'Neue Top-Angebote', 'Wenn ein Angebot günstiger ist als dein Großhändler')}${t('drops', 'Preissenkungen', 'Wenn ein Produkt deutlich billiger wird')}${t('weekly', 'Wochenübersicht', 'Jeden Montag die Angebote der Woche')}
     <p class="sub small" style="margin:8px 0 0">Deine Auswahl wird gespeichert. Der Versand der Benachrichtigungen kommt in einer späteren Version.</p></div>`;
   }
-  if (p === 'einstellungen') return head('⚙️ Einstellungen') + `<div class="pcard">
-    <label class="row between" style="padding:6px 0"><span>Preise standardmäßig netto anzeigen</span><input type="checkbox" class="chk" ${S.profile.net_default ? 'checked' : ''} onchange="netMode=this.checked;saveProfile({net_default:this.checked},'Gespeichert')"></label></div>`;
+  if (p === 'einstellungen') { const nOn = !!(S.profile.notify || {}).enabled; return head('⚙️ Einstellungen') + `<div class="pcard">
+    <label class="row between" style="flex-wrap:nowrap;gap:12px;padding:6px 0;border-bottom:1px dashed var(--line)"><span><b style="font-weight:600">Benachrichtigungen erlauben</b><br><span class="sub">Hinweise zu Top-Angeboten und Preissenkungen</span></span><input type="checkbox" class="chk" ${nOn ? 'checked' : ''} onchange="setNotifyEnabled(this.checked)"></label>
+    ${nOn ? `<button type="button" class="ghost sm" style="margin:8px 0 4px" onclick="openPage('benachrichtigungen')">Benachrichtigungen verwalten ›</button>` : ''}
+    <label class="row between" style="flex-wrap:nowrap;gap:12px;padding:6px 0"><span>Preise standardmäßig netto anzeigen</span><input type="checkbox" class="chk" ${S.profile.net_default ? 'checked' : ''} onchange="netMode=this.checked;saveProfile({net_default:this.checked},'Gespeichert')"></label></div>` }
   if (p === 'support') {
     const mail = CFG.SUPPORT_EMAIL;
     return head('💬 Hilfe &amp; Support') + `
     <div class="pcard" style="margin-bottom:10px"><b>Häufige Fragen</b>
     ${[['Woher kommen die Supermarktpreise?', 'Jeden Morgen durchsucht die App die aktuellen Prospekt-Angebote der Supermärkte rund um deine Postleitzahl. Normalpreise, die nicht online stehen, kannst du beim Produkt selbst eintragen.'],
+       ['Woher kommen die Normalpreise?', 'Aus Open Prices, einer freien Datenbank von Open Food Facts, in der Menschen Preise aus dem Laden melden. Dafür braucht das Produkt einen Barcode (EAN). Dazu kommen Streichpreise aus Prospekten und alles, was du selbst einträgst – dein eigener Wert hat immer Vorrang.'],
        ['Warum findet die App ein Produkt nicht?', 'Prospekte enthalten nur Angebote. Wenn gerade niemand dein Produkt im Angebot hat, gibt es nichts zu finden. Hilft das nicht, trag beim Produkt einen kürzeren Suchbegriff ein.'],
        ['Ein Angebot passt nicht zu meinem Produkt.', 'Tippe beim Produkt unter „Preise anzeigen“ auf „Falscher Treffer“. Es wird dann nicht mehr berücksichtigt.'],
        ['Warum wird ein Kasten auf Flaschenpreis umgerechnet?', 'Damit du fair vergleichen kannst: Alle Preise gelten pro Einheit (z. B. pro Flasche). Der Packungspreis steht klein daneben.'],
@@ -627,7 +748,7 @@ function pageView(p) {
     <div class="pcard"><b>Nachricht an den Support</b><textarea id="supportMsg" class="note" placeholder="Wie können wir helfen?" style="margin:8px 0"></textarea>
     ${mail ? `<button onclick="location.href='mailto:${esc(mail)}?subject=CornerstoreAI%20Support&body='+encodeURIComponent($('#supportMsg').value)">✉️ Per E-Mail senden</button>` : '<p class="sub" style="margin:0">Support-Adresse noch nicht eingerichtet (config.js).</p>'}</div>`;
   }
-  if (p === 'rechtliches') return head('📄 Datenschutz &amp; Impressum') + `<div class="pcard"><details class="pricedrop" style="border:0;margin:0;padding:0"><summary>Datenschutzerklärung</summary><p class="sub">Platzhalter – muss vor der Freigabe für andere Nutzer ergänzt werden.</p></details><details class="pricedrop"><summary>Impressum</summary><p class="sub">Platzhalter – muss vor der Freigabe für andere Nutzer ergänzt werden.</p></details><details class="pricedrop"><summary>Nutzungsbedingungen</summary><p class="sub">Platzhalter.</p></details>
+  if (p === 'rechtliches') return head('📄 Datenschutz &amp; Impressum') + `<div class="pcard"><details class="pricedrop" style="border:0;margin:0;padding:0"><summary>Datenschutzerklärung</summary><p class="sub">Platzhalter – muss vor der Freigabe für andere Nutzer ergänzt werden.</p></details><details class="pricedrop"><summary>Impressum</summary><p class="sub">Platzhalter – muss vor der Freigabe für andere Nutzer ergänzt werden.</p></details><details class="pricedrop"><summary>Nutzungsbedingungen</summary><p class="sub">Platzhalter.</p></details><details class="pricedrop"><summary>Datenquellen</summary><p class="sub">Normalpreise: <a href="https://prices.openfoodfacts.org" target="_blank" rel="noopener">Open Prices</a> von Open Food Facts, lizenziert unter der Open Database License (ODbL). Produktnamen beim Barcode-Scan: <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a> (ODbL). Prospekt-Angebote: marktguru.</p></details>
     <button class="ghost sm" style="margin-top:12px;color:var(--hot)" onclick="deleteAccountInfo()">Konto löschen</button></div>`;
   return head('Seite') + '<p class="muted">Kommt bald.</p>';
 }
