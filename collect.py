@@ -374,11 +374,27 @@ class AldiSued:
         self._index: list[tuple[str, str]] | None = None
         self.pages: dict[str, tuple] = {}
 
+    def _get_xml(self, url: str) -> str:
+        r = self.s.get(url, timeout=60, headers={"Accept": "application/xml,text/xml,*/*"})
+        body = r.content
+        if body[:2] == b"\x1f\x8b":                    # gepackte Sitemap (.xml.gz)
+            import gzip
+            body = gzip.decompress(body)
+        text = body.decode("utf-8", "replace")
+        if r.status_code >= 400 or "<loc>" not in text:
+            print(f"  Aldi Süd: {url} -> HTTP {r.status_code}, {len(text)} Zeichen, Anfang: {text[:160]!r}")
+        return text
+
     def index(self) -> list[tuple[str, str]]:
         if self._index is None:
-            xml = self.s.get(ALDI_SUED_SITEMAP, timeout=60).text
-            urls = re.findall(r"<loc>\s*([^<\s]+/produkt/[^<\s]+)\s*</loc>", xml)
-            self._index = [(u, slug_text(u)) for u in urls]
+            urls: list[str] = []
+            xml = self._get_xml(ALDI_SUED_SITEMAP)
+            urls = re.findall(r"<loc>\s*([^<\s]*/produkt/[^<\s]+)\s*</loc>", xml)
+            if not urls:                                  # Rückfall: Sitemap-Verzeichnis durchsuchen
+                for sub in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", self._get_xml("https://www.aldi-sued.de/sitemap.xml")):
+                    if "product" in sub or "produkt" in sub:
+                        urls += re.findall(r"<loc>\s*([^<\s]*/produkt/[^<\s]+)\s*</loc>", self._get_xml(sub))
+            self._index = [(u, slug_text(u)) for u in dict.fromkeys(urls)]
             print(f"  Aldi Süd: {len(self._index)} Produkte in der Sitemap")
         return self._index
 
@@ -414,6 +430,7 @@ ALDI_NORD_SITEMAP = "https://www.aldi-nord.de/sitemaps/.aldi-nord-sitemap-produc
 ALDI_NORD_KEYS = ("aldinord",)
 ALDI_NORD_REFRESH_PER_RUN = 800        # max. Produktseiten pro Lauf (erster Lauf ca. 8 Min., danach nur veraltete)
 ALDI_NORD_MAX_AGE_DAYS = 4             # danach wird ein Eintrag neu gelesen
+ALDI_NORD_PARSER_SINCE = "2026-09-29T23:00:00+00:00"   # Einträge von vorher mit der verbesserten Logik neu lesen
 
 
 def _walk(o):
@@ -431,6 +448,18 @@ def _num(v):
         return float(str(v).replace(",", "."))
     except (TypeError, ValueError):
         return None
+
+
+def _txt(v) -> str:
+    if isinstance(v, dict):
+        v = v.get("name") or v.get("title") or v.get("value") or ""
+    return v.strip() if isinstance(v, str) else ""
+
+
+def page_title(html: str) -> str:
+    t = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html) or re.search(r"<title[^>]*>(.*?)</title>", html, re.S)
+    title = (t.group(1) if t else "").replace("&amp;", "&").replace("&#x27;", "'").strip()
+    return re.sub(r"\s*(\||–|-)\s*(ALDI|günstig).*$", "", title, flags=re.I).strip()
 
 
 def parse_aldi_nord(html: str, url: str) -> dict | None:
@@ -459,7 +488,11 @@ def parse_aldi_nord(html: str, url: str) -> dict | None:
         def score(d):   # der Artikel, dessen Nummer in der Adresse steht, ist der Hauptartikel der Seite
             vals = {str(v) for k, v in d.items() if isinstance(v, (str, int)) and re.search(r"id|number|sku|code", k, re.I)}
             return 1 if ids & {re.sub(r"\D", "", v) for v in vals} else 0
-        d = sorted(items, key=score, reverse=True)[0]
+        title = page_title(html)
+        def score2(d):   # zusätzlich: Name des Artikels steht im Seitentitel
+            n = norm(_txt(d.get("name")) or _txt(d.get("productName")))
+            return (score(d), 1 if n and n in norm(title) else 0)
+        d = sorted(items, key=score2, reverse=True)[0]
         cp = d["currentPrice"]
         price = _num(cp.get("priceValue"))
         old = None
@@ -468,16 +501,20 @@ def parse_aldi_nord(html: str, url: str) -> dict | None:
                 n = _num(v.get("priceValue") if isinstance(v, dict) else v)
                 if n and price and n > price:
                     old = n
-        return {"brand": (d.get("brandName") or d.get("brand") or "").strip() if isinstance(d.get("brandName") or d.get("brand") or "", str) else "",
-                "name": (d.get("name") or d.get("productName") or "").strip(),
-                "sales_unit": (d.get("salesUnit") or d.get("packaging") or "").strip() if isinstance(d.get("salesUnit") or "", str) else "",
-                "price": price, "old_price": old}
+        brand = _txt(d.get("brandName")) or _txt(d.get("brand"))
+        name = _txt(d.get("name")) or _txt(d.get("productName"))
+        if title and (not brand or brand.lower() not in title.lower()) and (not name or norm(name) in norm(title)):
+            brand, name = "", title                  # Seitentitel enthält meist Marke + Name
+        unit = _txt(d.get("salesUnit")) or _txt(d.get("packaging")) or _txt(d.get("quantity"))
+        if not unit:
+            m2 = re.search(r"(\d+\s*x\s*)?\d+(?:,\d+)?\s*-?\s*(?:ml|l|g|kg)\b", re.sub(r"<[^>]+>", " ", html))
+            unit = m2.group(0) if m2 else ""
+        return {"brand": brand, "name": name, "sales_unit": unit, "price": price, "old_price": old}
     # Rückfall: sichtbarer Text + Seitentitel
     price, old = parse_aldi_price(html)
     if not price:
         return None
-    t = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html) or re.search(r"<title>(.*?)</title>", html, re.S)
-    title = re.sub(r"\s*(\||–|-)\s*ALDI.*$", "", (t.group(1) if t else ""), flags=re.I).strip()
+    title = page_title(html)
     unit = re.search(r"(\d+\s*x\s*)?\d+(?:,\d+)?\s*-?\s*(?:ml|l|g|kg)\b", re.sub(r"<[^>]+>", " ", html))
     return {"brand": "", "name": title, "sales_unit": unit.group(0) if unit else "", "price": price, "old_price": old}
 
@@ -512,7 +549,7 @@ class AldiNord:
         except Exception as ex:  # noqa: BLE001
             print("  Hinweis: Aldi-Nord-Sitemap nicht erreichbar:", ex)
             urls = list(self.cat)
-        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=ALDI_NORD_MAX_AGE_DAYS)).isoformat()
+        cutoff = max((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=ALDI_NORD_MAX_AGE_DAYS)).isoformat(), ALDI_NORD_PARSER_SINCE)
         todo = [u for u in urls if u not in self.cat] + sorted([u for u in urls if u in self.cat and (self.cat[u].get("updated_at") or "") < cutoff],
                                                                   key=lambda u: self.cat[u].get("updated_at") or "")
         fresh, failed = [], 0
@@ -532,6 +569,8 @@ class AldiNord:
         for u in gone:
             self.cat.pop(u, None)
         print(f"  Aldi Nord: {len(self.cat)} Produkte im Katalog, {len(fresh)} aufgefrischt, {failed} Seiten nicht lesbar")
+        for r in list(self.cat.values())[:3]:     # Stichprobe fürs Protokoll
+            print(f"    Beispiel: {r.get('brand') or ''} | {r.get('name') or ''} | {r.get('sales_unit') or ''} | {r.get('price')} €")
 
     def index(self) -> list[tuple[str, str]]:
         if self._index is None:
@@ -573,8 +612,13 @@ def aldi_match(product: dict, index: list[tuple[str, str]]) -> tuple[str, str] |
 
 def aldi_rows(product: dict, aldi, retailer_label: str) -> list[dict]:
     """Regalpreis bei Aldi Süd bzw. Aldi Nord (je nach übergebenem Abrufer)."""
-    hit = aldi_match(product, aldi.index())
+    idx = aldi.index()
+    hit = aldi_match(product, idx)
     if not hit:
+        toks = core_tokens(search_term(product))
+        near = max(idx, key=lambda it: sum(token_in(t, norm(it[1]).split()) for t in toks), default=None)
+        if near and any(token_in(t, norm(near[1]).split()) for t in toks):
+            print(f"    {aldi.LABEL}: kein Treffer für '{product['name']}' (am ähnlichsten: '{near[1]}')")
         return []
     url, text = hit
     price, old = aldi.price(url)
