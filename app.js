@@ -8,6 +8,7 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const eur = n => (+n || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+const deNum = v => v == null || v === '' ? '' : String(+v).replace('.', ',');
 const toNum = v => { const n = parseFloat(String(v ?? '').replace(',', '.')); return isFinite(n) ? n : null; };
 let netMode = false;
 const conv = (n, vat = 19) => netMode ? n / (1 + vat / 100) : n;
@@ -60,7 +61,7 @@ async function fetchAll(table, cols, mod = x => x) {
 async function loadAll() {
   const uid = S.user.id;
   const since = new Date(); since.setFullYear(since.getFullYear() - 5);
-  const [profile, prods, vend, vp, rp, hist, crt, runs] = await Promise.all([
+  const [profile, prods, vend, vp, rp, hist, crt, runs, comm] = await Promise.all([
     must(sb.from('profiles').select('*').eq('id', uid).maybeSingle()),
     fetchAll('products', '*', x => x.order('name')),
     fetchAll('vendors', '*', x => x.order('id')),
@@ -69,9 +70,10 @@ async function loadAll() {
     fetchAll('price_history', 'product_id,day,best_price', x => x.gte('day', ymd(since)).order('day')),
     fetchAll('cart_items', '*', x => x.order('created_at')),
     must(sb.from('collector_runs').select('*').order('id', { ascending: false }).limit(1)),
+    sb.rpc('community_prices').then(r => r.error ? [] : (r.data || [])),   // fehlt die Funktion noch in der DB: einfach leer
   ]);
   S.profile = profile || await must(sb.from('profiles').insert({ id: uid }).select().single());
-  Object.assign(S, { products: prods, vendorsRaw: vend, vprices: vp, retailRows: rp, history: hist, cart: crt, lastRun: runs[0] || null, loaded: true });
+  Object.assign(S, { products: prods, vendorsRaw: vend, vprices: vp, retailRows: rp, history: hist, cart: crt, community: comm, lastRun: runs[0] || null, loaded: true });
   if (!loadAll.once) { netMode = !!S.profile.net_default; loadAll.once = true; }
   buildIndex();
 }
@@ -82,12 +84,19 @@ function buildIndex() {
   for (const x of S.vprices) { const v = vendors.find(v => v.id === x.vendor_id); if (v) v.prices[x.product_id] = +x.price; }
   R = {};
   for (const r of S.retailRows) {
-    const e = ((R[r.product_id] = R[r.product_id] || {})[r.retailer] = R[r.product_id][r.retailer] || { regular: null, regularMg: null, regularOp: null, deals: [], auto: [] });
+    const e = ((R[r.product_id] = R[r.product_id] || {})[r.retailer] = R[r.product_id][r.retailer] || { regular: null, regularMg: null, regularOp: null, regularAldi: null, regularCom: null, deals: [], auto: [] });
     if (r.ext_key === 'regular') e.regular = r;
     else if (r.ext_key === 'regular-mg') e.regularMg = r;
     else if (r.ext_key === 'regular-op') e.regularOp = r;
+    else if (r.ext_key === 'regular-aldi') e.regularAldi = r;
     else if (r.ext_key.startsWith('deal:')) e.deals.push(r);
     else e.auto.push(r);
+  }
+  // Community: Normalpreise anderer User (ohne Namen), Supermarkt über den Namen zugeordnet
+  for (const c of S.community || []) {
+    const label = RETAIL.find(r => r.toLowerCase() === String(c.retailer).toLowerCase()); if (!label) continue;
+    const e = ((R[c.product_id] = R[c.product_id] || {})[label] = R[c.product_id][label] || { regular: null, regularMg: null, regularOp: null, regularAldi: null, regularCom: null, deals: [], auto: [] });
+    e.regularCom = { ext_key: 'regular-community', source: 'community', retailer: label, price: +c.price, valid_from: c.reported, reports: c.reports, is_offer: false };
   }
   const toItem = c => ({ pid: c.product_id, qty: c.qty || '', note: c.note || '', checked: c.checked });
   cart = S.cart.filter(c => (c.list || 'einkauf') === 'einkauf').map(toItem);
@@ -107,14 +116,23 @@ function retailEntry(pid, r, w) {
   return { regular, deal, regularRow: e.regular || auto };
 }
 // Automatisch bekannter Normalpreis: die jüngere Angabe aus Open Prices (Meldedatum) oder dem Prospekt-Streichpreis
+// Automatisch bekannter Normalpreis: die jüngste Angabe gewinnt (bei Gleichstand: Aldi-Website > andere User > Open Prices > Prospekt)
 function autoRegular(e) {
-  const op = e.regularOp, mg = e.regularMg;
-  if (op && mg) return (op.valid_from || '') >= (mg.fetched_at || '').slice(0, 10) ? op : mg;
-  return op || mg || null;
+  const c = [[e.regularAldi, 4], [e.regularCom, 3], [e.regularOp, 2], [e.regularMg, 1]].filter(x => x[0])
+    .map(([r, prio]) => ({ r, d: (r.ext_key === 'regular-mg' ? (r.fetched_at || '').slice(0, 10) : r.valid_from) || '', prio }));
+  c.sort((a, b) => b.d.localeCompare(a.d) || b.prio - a.prio);
+  return c[0]?.r || null;
+}
+function autoRegulars(e) { return [e.regularAldi, e.regularCom, e.regularOp, e.regularMg].filter(Boolean); }
+function srcBadge(r) {
+  if (!r) return '';
+  return r.source === 'manuell' ? '✎ von dir' : r.source === 'aldi' ? '🌐 Aldi-Website' : r.source === 'community' ? '👥 andere User' : r.source === 'openprices' ? '🌍 Open Prices' : r.ext_key === 'regular-mg' ? '📰 Prospekt' : r.source === 'marktguru' ? '🔥 Prospekt' : '';
 }
 function srcLabel(r) {
   if (!r) return '';
   if (r.source === 'openprices') return r.title || 'Open Prices';
+  if (r.source === 'aldi') return 'Regalpreis von der ' + r.retailer + '-Website, Stand ' + deDate(r.valid_from) + (r.title ? ' · ' + r.title.replace(/^[^:]*:\s*/, '') : '');
+  if (r.source === 'community') return (r.reports > 1 ? r.reports + ' andere User haben' : 'Ein anderer User hat') + ' diesen Normalpreis gemeldet, zuletzt am ' + deDate(r.valid_from);
   if (r.ext_key === 'regular-mg') return 'Streichpreis aus Prospekt vom ' + deDate(r.fetched_at);
   if (r.source === 'manuell') return r.is_offer ? 'Angebot, von dir eingetragen' : 'Normalpreis, von dir eingetragen';
   return r.title || '';
@@ -396,23 +414,27 @@ function priceDropdown(p) {
         <button type="button" class="ghost sm" onclick="hideOffer(${a.id},${!a.hidden})">${a.hidden ? 'Wieder zeigen' : '✕ Falscher Treffer'}</button></div>`).join('')
         : `<p class="sub" style="margin:0">${(S.profile.zip || '').trim() ? 'Aktuell nichts gefunden. Der Abruf läuft jeden Morgen.' : 'Trag erst deine PLZ unter „Mein Laden“ ein.'}</p>`}
     </div>
-    <div class="pricegrp"><h3>🏪 Einzelhandel (manuell)</h3>
+    <div class="pricegrp"><h3>🏪 Einzelhandel</h3>
       <div class="vgrid4 hd"><span></span><span>Regulär</span><span>Diese Wo.</span><span>Nächste Wo.</span></div>
-      ${RETAIL.map((r, i) => { const e = R[p.id]?.[r] || {}; const d0 = (e.deals || []).find(d => d.ext_key === 'deal:' + w0), d1 = (e.deals || []).find(d => d.ext_key === 'deal:' + w1);
-        return `<div class="vgrid4"><span class="muted">${esc(r)}</span>
-        <input inputmode="decimal" value="${e.regular ? e.regular.price : ''}" placeholder="${autoRegular(e) ? String(autoRegular(e).price).replace('.', ',') : '—'}" aria-label="Normalpreis ${esc(r)}" onchange="setRetail(${p.id},${i},this.value)">
-        <input inputmode="decimal" placeholder="—" value="${d0 ? d0.price : ''}" aria-label="Angebot diese Woche ${esc(r)}" onchange="setDeal(${p.id},${i},0,this.value)">
-        <input inputmode="decimal" placeholder="—" value="${d1 ? d1.price : ''}" aria-label="Angebot nächste Woche ${esc(r)}" onchange="setDeal(${p.id},${i},1,this.value)"></div>`; }).join('')}
-      <p class="sub small" style="margin:4px 0 0">Graue Werte = automatisch gefundener Normalpreis. Ein eigener Wert hat immer Vorrang. Alles brutto pro ${esc(p.unit)}.</p>
+      ${RETAIL.map((r, i) => { const e = R[p.id]?.[r] || { deals: [], auto: [] };
+        const auto = autoRegular(e), regRow = e.regular || auto;
+        const cell = (w) => { const from = weekRange(w).from, to = weekRange(w).to, man = (e.deals || []).find(d => d.ext_key === 'deal:' + from);
+          const au = (e.auto || []).filter(a => !a.hidden && (a.valid_from || from) <= to && (a.valid_to || to) >= from).sort((a, b) => a.price - b.price)[0];
+          const row = man || au;
+          return `<input inputmode="decimal" class="${!man && au ? 'auto' : ''}" placeholder="—" value="${row ? deNum(row.price) : ''}" title="${esc(srcLabel(row))}" aria-label="Angebot ${w ? 'nächste' : 'diese'} Woche ${esc(r)}" onchange="setDeal(${p.id},${i},${w},this.value)">`; };
+        return `<div class="vgrid4"><span class="muted">${esc(r)}${regRow ? `<span class="srcb">${srcBadge(regRow)}</span>` : ''}</span>
+        <input inputmode="decimal" class="${!e.regular && auto ? 'auto' : ''}" value="${regRow ? deNum(regRow.price) : ''}" placeholder="—" title="${esc(srcLabel(regRow))}" aria-label="Normalpreis ${esc(r)}" onchange="setRetail(${p.id},${i},this.value)">
+        ${cell(0)}${cell(1)}</div>`; }).join('')}
+      <p class="sub small" style="margin:6px 0 0"><span class="autodemo">Blaue Werte</span> hat die App automatisch gefunden, darunter steht die Quelle. Tippst du einen eigenen Wert ein, gilt deiner. Deine Normalpreise sehen andere User anonym (ohne Namen) – so füllt sich die Tabelle für alle. Alles brutto pro ${esc(p.unit)}.</p>
     </div>
-    <div class="pricegrp"><h3>🌍 Gemeldete Normalpreise (Open Prices)</h3>
-      ${(() => { const ops = RETAIL.map(r => R[p.id]?.[r]?.regularOp).filter(Boolean);
-        if (ops.length) return ops.map(o => `<div class="offerline"><span class="t"><b>${esc(o.retailer)}</b> ${fmt(o.price, p.vat)} · ${deDate(o.valid_from)}<br><span class="small">${esc(o.title || '')}</span></span></div>`).join('') + '<p class="sub small" style="margin:4px 0 0">Quelle: <a href="https://prices.openfoodfacts.org" target="_blank" rel="noopener">Open Prices</a> von Open Food Facts, Lizenz ODbL.</p>';
-        return `<p class="sub" style="margin:0">${p.ean ? 'Für diesen Barcode wurde in den letzten 6 Monaten noch kein Preis bei deinen Supermärkten gemeldet.' : 'Trag unten den Barcode (EAN) ein oder scanne das Produkt neu – dann sucht die App auch gemeldete Normalpreise.'}</p>`; })()}
+    <div class="pricegrp"><h3>🔎 Woher die Normalpreise kommen</h3>
+      ${(() => { const rows = RETAIL.flatMap(r => autoRegulars(R[p.id]?.[r] || {}));
+        if (rows.length) return rows.map(o => `<div class="offerline"><span class="t"><b>${esc(o.retailer)}</b> ${fmt(o.price, p.vat)} · ${srcBadge(o)}<br><span class="small">${esc(srcLabel(o))}</span></span></div>`).join('') + (rows.some(o => o.source === 'openprices') ? '<p class="sub small" style="margin:4px 0 0">Open Prices von Open Food Facts, Lizenz ODbL.</p>' : '');
+        return `<p class="sub" style="margin:0">Noch keine automatischen Normalpreise.${p.ean ? '' : ' Tipp: Trag unten den Barcode (EAN) ein – dann findet die App mehr.'}</p>`; })()}
     </div>
     <div class="pricegrp"><h3>📦 Großhändler &amp; Vertragspartner</h3>
       ${vendors.length ? vendors.map(v => `<div class="vgrid"><span class="muted">${esc(v.name)} <span class="small">(${v.net ? 'netto' : 'brutto'})</span></span>
-        <input inputmode="decimal" placeholder="—" value="${v.prices[p.id] ?? ''}" aria-label="Preis ${esc(v.name)}" onchange="setVendorPrice(${v.id},${p.id},this.value)"><span></span></div>`).join('') : '<p class="muted">Noch keine Großhändler angelegt (Reiter „Händler“).</p>'}
+        <input inputmode="decimal" placeholder="—" value="${deNum(v.prices[p.id])}" aria-label="Preis ${esc(v.name)}" onchange="setVendorPrice(${v.id},${p.id},this.value)"><span></span></div>`).join('') : '<p class="muted">Noch keine Großhändler angelegt (Reiter „Händler“).</p>'}
     </div>
     <div class="pricegrp"><h3>⚙️ Produkt-Einstellungen</h3>
       <div class="pset" style="grid-template-columns:1fr"><input value="${esc(p.ean || '')}" inputmode="numeric" placeholder="Barcode / EAN (optional)" aria-label="Barcode" onchange="setProd(${p.id},'ean',this.value.replace(/\\D/g,''))"></div>
@@ -532,7 +554,7 @@ function vendorsView() {
     </details>
     <div class="pricegrp"><h3>Preise pro Artikel</h3>
       ${products.length ? products.map(p => `<div class="vgrid"><span class="muted">${esc(p.name)}</span>
-        <input inputmode="decimal" placeholder="—" value="${v.prices[p.id] ?? ''}" aria-label="Preis ${esc(p.name)} bei ${esc(v.name)}" onchange="setVendorPrice(${v.id},${p.id},this.value)">
+        <input inputmode="decimal" placeholder="—" value="${deNum(v.prices[p.id])}" aria-label="Preis ${esc(p.name)} bei ${esc(v.name)}" onchange="setVendorPrice(${v.id},${p.id},this.value)">
         <span></span></div>`).join('') : '<p class="muted">Noch keine Produkte angelegt.</p>'}
     </div>
     <details class="pricedrop"><summary>Preisliste hochladen oder aktualisieren</summary>
@@ -739,7 +761,7 @@ function pageView(p) {
     return head('💬 Hilfe &amp; Support') + `
     <div class="pcard" style="margin-bottom:10px"><b>Häufige Fragen</b>
     ${[['Woher kommen die Supermarktpreise?', 'Jeden Morgen durchsucht die App die aktuellen Prospekt-Angebote der Supermärkte rund um deine Postleitzahl. Normalpreise, die nicht online stehen, kannst du beim Produkt selbst eintragen.'],
-       ['Woher kommen die Normalpreise?', 'Aus Open Prices, einer freien Datenbank von Open Food Facts, in der Menschen Preise aus dem Laden melden. Dafür braucht das Produkt einen Barcode (EAN). Dazu kommen Streichpreise aus Prospekten und alles, was du selbst einträgst – dein eigener Wert hat immer Vorrang.'],
+       ['Woher kommen die Normalpreise?', 'Aus mehreren Quellen: den Websites von Aldi Süd und Aldi Nord, Preisen, die andere User anonym eingetragen haben, Open Prices (freie Datenbank von Open Food Facts, braucht den Barcode) und Streichpreisen aus Prospekten. Die jüngste Angabe gewinnt – dein eigener Wert hat immer Vorrang.'],
        ['Warum findet die App ein Produkt nicht?', 'Prospekte enthalten nur Angebote. Wenn gerade niemand dein Produkt im Angebot hat, gibt es nichts zu finden. Hilft das nicht, trag beim Produkt einen kürzeren Suchbegriff ein.'],
        ['Ein Angebot passt nicht zu meinem Produkt.', 'Tippe beim Produkt unter „Preise anzeigen“ auf „Falscher Treffer“. Es wird dann nicht mehr berücksichtigt.'],
        ['Warum wird ein Kasten auf Flaschenpreis umgerechnet?', 'Damit du fair vergleichen kannst: Alle Preise gelten pro Einheit (z. B. pro Flasche). Der Packungspreis steht klein daneben.'],
@@ -748,7 +770,7 @@ function pageView(p) {
     <div class="pcard"><b>Nachricht an den Support</b><textarea id="supportMsg" class="note" placeholder="Wie können wir helfen?" style="margin:8px 0"></textarea>
     ${mail ? `<button onclick="location.href='mailto:${esc(mail)}?subject=CornerstoreAI%20Support&body='+encodeURIComponent($('#supportMsg').value)">✉️ Per E-Mail senden</button>` : '<p class="sub" style="margin:0">Support-Adresse noch nicht eingerichtet (config.js).</p>'}</div>`;
   }
-  if (p === 'rechtliches') return head('📄 Datenschutz &amp; Impressum') + `<div class="pcard"><details class="pricedrop" style="border:0;margin:0;padding:0"><summary>Datenschutzerklärung</summary><p class="sub">Platzhalter – muss vor der Freigabe für andere Nutzer ergänzt werden.</p></details><details class="pricedrop"><summary>Impressum</summary><p class="sub">Platzhalter – muss vor der Freigabe für andere Nutzer ergänzt werden.</p></details><details class="pricedrop"><summary>Nutzungsbedingungen</summary><p class="sub">Platzhalter.</p></details><details class="pricedrop"><summary>Datenquellen</summary><p class="sub">Normalpreise: <a href="https://prices.openfoodfacts.org" target="_blank" rel="noopener">Open Prices</a> von Open Food Facts, lizenziert unter der Open Database License (ODbL). Produktnamen beim Barcode-Scan: <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a> (ODbL). Prospekt-Angebote: marktguru.</p></details>
+  if (p === 'rechtliches') return head('📄 Datenschutz &amp; Impressum') + `<div class="pcard"><details class="pricedrop" style="border:0;margin:0;padding:0"><summary>Datenschutzerklärung</summary><p class="sub">Platzhalter – muss vor der Freigabe für andere Nutzer ergänzt werden.</p></details><details class="pricedrop"><summary>Impressum</summary><p class="sub">Platzhalter – muss vor der Freigabe für andere Nutzer ergänzt werden.</p></details><details class="pricedrop"><summary>Nutzungsbedingungen</summary><p class="sub">Platzhalter.</p></details><details class="pricedrop"><summary>Datenquellen</summary><p class="sub">Normalpreise: <a href="https://prices.openfoodfacts.org" target="_blank" rel="noopener">Open Prices</a> von Open Food Facts, lizenziert unter der Open Database License (ODbL). Produktnamen beim Barcode-Scan: <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a> (ODbL). Prospekt-Angebote: marktguru. Aldi-Regalpreise: öffentliche Produktseiten von aldi-sued.de und aldi-nord.de. Community-Preise: von Usern dieser App eingetragene Normalpreise – geteilt werden nur Produkt, Supermarkt, Preis und Datum, nie wer sie eingetragen hat.</p></details>
     <button class="ghost sm" style="margin-top:12px;color:var(--hot)" onclick="deleteAccountInfo()">Konto löschen</button></div>`;
   return head('Seite') + '<p class="muted">Kommt bald.</p>';
 }

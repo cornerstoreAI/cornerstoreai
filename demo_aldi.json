@@ -1,0 +1,18 @@
+{
+ "urls": [
+  "https://www.aldi-sued.de/produkt/red-bull-energy-drink-250-ml-000000000000444184",
+  "https://www.aldi-sued.de/produkt/red-bull-energy-drink-sugarfree-250-ml-000000000000444178",
+  "https://www.aldi-sued.de/produkt/haribo-goldbaeren-175-g-000000000000123456",
+  "https://www.aldi-sued.de/produkt/haribo-goldbaeren-200-g-000000000000123457",
+  "https://www.aldi-sued.de/produkt/jaegermeister-krauterlikor-0-7-l-000000000000555555",
+  "https://www.aldi-sued.de/produkt/sternburg-export-20-x-0-5-l-000000000000777777",
+  "https://www.aldi-sued.de/produkt/ferrero-maxi-king-105-g-000000000000107055"
+ ],
+ "pages": {
+  "https://www.aldi-sued.de/produkt/red-bull-energy-drink-250-ml-000000000000444184": "<div class=\"price\"><span>0,89 €</span><span>inkl. MwSt.</span>+ 0,25 € Pfand EINWEG</div><p>0,25 l (3,56 €/1 l)</p>",
+  "https://www.aldi-sued.de/produkt/red-bull-energy-drink-sugarfree-250-ml-000000000000444178": "<span>0,99&nbsp;€</span> inkl. MwSt.",
+  "https://www.aldi-sued.de/produkt/haribo-goldbaeren-200-g-000000000000123457": "<span class=\"old\">statt 1,29 €</span> <span>0,99 €</span> inkl. MwSt.",
+  "https://www.aldi-sued.de/produkt/jaegermeister-krauterlikor-0-7-l-000000000000555555": "<script type=\"application/ld+json\">{\"@type\":\"Product\",\"offers\":{\"@type\":\"Offer\",\"price\":\"11.99\",\"priceCurrency\":\"EUR\"}}</script>",
+  "https://www.aldi-sued.de/produkt/sternburg-export-20-x-0-5-l-000000000000777777": "<b>12,99 €</b> inkl. MwSt. + 3,10 € Pfand"
+ }
+}

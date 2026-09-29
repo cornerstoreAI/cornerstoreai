@@ -1,13 +1,96 @@
 {
- "profiles": [{"id": "u1", "zip": "68159", "retailers": ["Rewe","Edeka","Penny","Netto","Kaufland","Lidl","Aldi Süd","Metro","Selgros","Action"]}],
- "products": [
-  {"id": 1, "user_id": "u1", "name": "Sternburg Export 0,5l", "category": "Alkohol", "search_term": null, "vat_rate": 19},
-  {"id": 2, "user_id": "u1", "name": "Astra Rotlicht 0,33l Dose", "category": "Alkohol", "search_term": null, "vat_rate": 19},
-  {"id": 3, "user_id": "u1", "name": "Jägermeister 0,7l", "category": "Alkohol", "search_term": null, "vat_rate": 19},
-  {"id": 4, "user_id": "u1", "name": "Red Bull 0,25l Dose", "category": "Alkoholfrei", "search_term": null, "vat_rate": 19},
-  {"id": 5, "user_id": "u1", "name": "Lucky Strike Rot", "category": "Zigaretten", "search_term": null, "vat_rate": 19},
-  {"id": 6, "user_id": "u1", "name": "Haribo Goldbären 200g", "category": "Snacks", "search_term": null, "vat_rate": 7}
+ "profiles": [
+  {
+   "id": "u1",
+   "zip": "68159",
+   "retailers": [
+    "Rewe",
+    "Edeka",
+    "Penny",
+    "Netto",
+    "Kaufland",
+    "Lidl",
+    "Aldi Süd",
+    "Metro",
+    "Selgros",
+    "Action",
+    "Aldi Nord"
+   ]
+  }
  ],
- "vendors": [{"id": 1, "name": "Metro Vertragspreis", "prices_net": true}],
- "vendor_prices": [{"vendor_id": 1, "product_id": 1, "price": 0.60}, {"vendor_id": 1, "product_id": 4, "price": 0.95}]
+ "products": [
+  {
+   "id": 1,
+   "user_id": "u1",
+   "name": "Sternburg Export 0,5l",
+   "category": "Alkohol",
+   "search_term": null,
+   "vat_rate": 19,
+   "ean": "4000000000011"
+  },
+  {
+   "id": 2,
+   "user_id": "u1",
+   "name": "Astra Rotlicht 0,33l Dose",
+   "category": "Alkohol",
+   "search_term": null,
+   "vat_rate": 19,
+   "ean": null
+  },
+  {
+   "id": 3,
+   "user_id": "u1",
+   "name": "Jägermeister 0,7l",
+   "category": "Alkohol",
+   "search_term": null,
+   "vat_rate": 19,
+   "ean": null
+  },
+  {
+   "id": 4,
+   "user_id": "u1",
+   "name": "Red Bull 0,25l Dose",
+   "category": "Alkoholfrei",
+   "search_term": null,
+   "vat_rate": 19,
+   "ean": "9002490100070"
+  },
+  {
+   "id": 5,
+   "user_id": "u1",
+   "name": "Lucky Strike Rot",
+   "category": "Zigaretten",
+   "search_term": null,
+   "vat_rate": 19,
+   "ean": null
+  },
+  {
+   "id": 6,
+   "user_id": "u1",
+   "name": "Haribo Goldbären 200g",
+   "category": "Snacks",
+   "search_term": null,
+   "vat_rate": 7,
+   "ean": "4001686301265"
+  }
+ ],
+ "vendors": [
+  {
+   "id": 1,
+   "name": "Metro Vertragspreis",
+   "prices_net": true
+  }
+ ],
+ "vendor_prices": [
+  {
+   "vendor_id": 1,
+   "product_id": 1,
+   "price": 0.6
+  },
+  {
+   "vendor_id": 1,
+   "product_id": 4,
+   "price": 0.95
+  }
+ ]
 }

@@ -183,3 +183,6 @@ nav#nav button.on{color:var(--accent);background:var(--surface2)}
 .searchbar.quick .qicon{position:absolute;left:13px;top:50%;transform:translateY(-50%);font-size:.95rem;opacity:.6;pointer-events:none}
 .searchbar.quick .qclear{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--mute);padding:6px 8px;font-size:.9rem}
 main{min-height:calc(100vh - 150px)}
+.vgrid4 input.auto{color:var(--accent);font-style:italic;background:var(--surface2);border-color:transparent}
+.autodemo{color:var(--accent);font-style:italic;font-weight:600}
+.srcb{display:block;font-size:.62rem;color:var(--mute);line-height:1.2;margin-top:1px}

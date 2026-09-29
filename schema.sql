@@ -109,6 +109,64 @@ create table if not exists public.cart_items (
   primary key (user_id, product_id)
 );
 
+-- ---------- Erweiterung: Großhändler-Bestellung (Version 2) ----------
+-- Zweite Liste in der Einkaufsliste + Kontaktdaten der Großhändler
+alter table public.cart_items add column if not exists list text not null default 'einkauf';  -- 'einkauf' | 'grosshandel'
+alter table public.cart_items drop constraint if exists cart_items_pkey;
+alter table public.cart_items add primary key (user_id, product_id, list);
+alter table public.vendors add column if not exists contact_name text;
+alter table public.vendors add column if not exists email text;
+alter table public.vendors add column if not exists phone text;
+alter table public.vendors add column if not exists customer_no text;
+
+-- ---------- Erweiterung: Community-Preise (Version 3) ----------
+-- Normalpreise, die ANDERE User von Hand eingetragen haben, für die eigenen Produkte.
+-- Zuordnung über den Barcode (EAN); ohne Barcode über den exakt gleichen Produktnamen.
+-- Es werden nur Preis, Supermarkt und Datum geteilt – nie, wer den Preis eingetragen hat.
+create or replace function public.community_prices()
+returns table (product_id bigint, retailer text, price numeric, reported date, reports int)
+language sql stable security definer set search_path = public as $$
+  with mine as (
+    select id, nullif(trim(ean), '') as ean, lower(regexp_replace(trim(name), '\s+', ' ', 'g')) as nname
+    from products where user_id = auth.uid()
+  ),
+  others as (
+    select lower(rp.retailer) as retailer, rp.price, rp.fetched_at,
+           nullif(trim(p.ean), '') as ean, lower(regexp_replace(trim(p.name), '\s+', ' ', 'g')) as nname
+    from retail_prices rp join products p on p.id = rp.product_id
+    where rp.ext_key = 'regular' and rp.source = 'manuell'
+      and rp.user_id <> auth.uid()
+      and rp.fetched_at > now() - interval '120 days'
+  ),
+  matched as (
+    select m.id as product_id, o.retailer, o.price, o.fetched_at
+    from mine m join others o
+      on (m.ean is not null and o.ean = m.ean)
+      or ((m.ean is null or o.ean is null) and o.nname = m.nname)
+  )
+  select distinct on (product_id, retailer)
+         product_id, retailer, price, fetched_at::date as reported,
+         (count(*) over (partition by product_id, retailer))::int as reports
+  from matched
+  order by product_id, retailer, fetched_at desc;
+$$;
+revoke all on function public.community_prices() from public, anon;
+grant execute on function public.community_prices() to authenticated;
+
+-- ---------- Erweiterung: Aldi-Nord-Katalog (Version 4) ----------
+-- Zwischenspeicher für den täglichen Abruf. Nur der Preis-Abruf (geheimer Schlüssel)
+-- greift darauf zu; für die App ist die Tabelle gesperrt (keine Regel = kein Zugriff).
+create table if not exists public.aldi_nord_index (
+  url         text primary key,
+  brand       text,
+  name        text,
+  sales_unit  text,
+  price       numeric(10,2),
+  old_price   numeric(10,2),
+  updated_at  timestamptz not null default now()
+);
+alter table public.aldi_nord_index enable row level security;
+
 -- ---------- Protokoll des täglichen Preis-Abrufs ----------
 create table if not exists public.collector_runs (
   id           bigint generated always as identity primary key,
