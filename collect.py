@@ -7,6 +7,8 @@ Läuft automatisch jeden Morgen über GitHub Actions (siehe .github/workflows/pr
 Ablauf:
   1. Alle Konten mit Postleitzahl und ihre Produkte aus Supabase laden
   2. Pro Produkt die aktuellen Prospekt-Angebote in der Nähe suchen (marktguru)
+     und – falls ein Barcode (EAN) hinterlegt ist – gemeldete Normalpreise aus Open Prices
+     (Open Food Facts, offene Daten unter ODbL-Lizenz) holen
   3. Passende Treffer herausfiltern (Name, Größe, Händler) und auf Stückpreis umrechnen
   4. Angebote speichern, abgelaufene löschen, Tages-Bestpreis in den Verlauf schreiben
 
@@ -139,6 +141,8 @@ def retailer_for(advertiser_names: list[str], wanted: list[str]) -> str | None:
     """Ordnet 'Netto Marken-Discount' dem Eintrag 'Netto' des Nutzers zu usw."""
     for adv in advertiser_names:
         a = compact(adv)
+        if len(a) < 2:
+            continue
         for w in wanted:
             c = compact(w)
             if c and (a.startswith(c) or c.startswith(a)):
@@ -237,6 +241,78 @@ class DemoMarktguru:
 
     def search(self, q: str, zip_code: str) -> list[Offer]:
         return [o for o in (Offer.from_api(e) for e in self.data.get(q.lower(), [])) if o]
+
+
+OPENPRICES_API = "https://prices.openfoodfacts.org/api/v1/prices"
+OP_MAX_AGE_DAYS = 180       # ältere Meldungen ignorieren
+OP_UA = "CornerstoreAI/1.0 (Preisvergleich fuer Spaetis)"
+
+
+class OpenPrices:
+    """Normalpreise, die Nutzer bei Open Prices gemeldet haben – abgefragt per Barcode (EAN)."""
+
+    def __init__(self):
+        self.s = requests.Session()
+        self.s.headers.update({"User-Agent": OP_UA, "Accept": "application/json"})
+        self.cache: dict[str, list[dict]] = {}
+
+    def prices(self, ean: str, since: dt.date) -> list[dict]:
+        if ean in self.cache:
+            return self.cache[ean]
+        time.sleep(0.5)
+        r = self.s.get(OPENPRICES_API, params={
+            "product_code": ean, "currency": "EUR", "date__gte": since.isoformat(),
+            "order_by": "-date", "size": 100, "app_name": "CornerstoreAI"}, timeout=30)
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        self.cache[ean] = items
+        return items
+
+
+class DemoOpenPrices:
+    def __init__(self, path: str):
+        with open(path, encoding="utf-8") as f:
+            self.data = json.load(f)
+
+    def prices(self, ean: str, since: dt.date) -> list[dict]:
+        return [i for i in self.data.get(ean, []) if (i.get("date") or "") >= since.isoformat()]
+
+
+def op_regular_rows(product: dict, items: list[dict], retailers: list[str], zip_code: str) -> list[dict]:
+    """Pro Händler die passendste Open-Prices-Meldung: gleiche PLZ-Region zuerst, dann die neueste."""
+    best: dict[str, tuple] = {}
+    for it in items:
+        loc = it.get("location") or {}
+        if (loc.get("osm_address_country_code") or "").upper() not in ("DE", ""):
+            continue
+        if (it.get("price_per") or "UNIT") != "UNIT":
+            continue
+        try:
+            price = float(it.get("price"))
+            if it.get("price_is_discounted"):
+                price = float(it.get("price_without_discount") or 0)  # Angebote kommen aus den Prospekten
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        ret = retailer_for([loc.get("osm_brand") or "", loc.get("osm_name") or ""], retailers)
+        if not ret:
+            continue
+        same_region = (loc.get("osm_address_postcode") or "")[:2] == zip_code[:2]
+        key = (same_region, it.get("date") or "")
+        if ret not in best or key > best[ret][0]:
+            where = " ".join(x for x in [loc.get("osm_name") or ret, loc.get("osm_address_city") or ""] if x)
+            best[ret] = (key, price, it.get("date"), where)
+    rows = []
+    for ret, (_, price, date, where) in best.items():
+        rows.append({
+            "user_id": product["user_id"], "product_id": product["id"], "retailer": ret,
+            "ext_key": "regular-op", "price": round(price, 2), "regular_price": round(price, 2),
+            "is_offer": False, "valid_from": date, "valid_to": None, "source": "openprices",
+            "title": f"Open Prices: gemeldet am {date} in {where}"[:300], "pack_count": 1, "pack_price": None,
+            "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        })
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -351,16 +427,17 @@ def best_offer_rows(product: dict, offers: list[Offer], retailers: list[str]) ->
     return list(best.values())
 
 
-def run(db, mg, today: dt.date | None = None) -> dict:
+def run(db, mg, today: dt.date | None = None, op=None) -> dict:
     today = today or dt.date.today()
     profiles = [p for p in db.get("profiles", {"select": "id,zip,retailers"}) if (p.get("zip") or "").strip()]
-    products = db.get("products", {"select": "id,user_id,name,category,search_term,vat_rate"})
+    products = db.get("products", {"select": "id,user_id,name,category,search_term,vat_rate,ean"})
     by_user: dict[str, list[dict]] = {}
     for p in products:
         by_user.setdefault(p["user_id"], []).append(p)
 
-    stats = {"konten": len(profiles), "produkte": 0, "angebote": 0, "fehler": 0}
-    offer_rows, regular_rows = [], []
+    stats = {"konten": len(profiles), "produkte": 0, "angebote": 0, "normalpreise": 0, "fehler": 0}
+    offer_rows, regular_rows, op_rows = [], [], []
+    op_since = today - dt.timedelta(days=OP_MAX_AGE_DAYS)
     for prof in profiles:
         zip_code = prof["zip"].strip()
         retailers = prof.get("retailers") or []
@@ -382,6 +459,12 @@ def run(db, mg, today: dt.date | None = None) -> dict:
                                         | {"ext_key": "regular-mg", "price": r["regular_price"], "is_offer": False,
                                            "source": "marktguru", "title": r["title"], "pack_count": 1,
                                            "valid_from": None, "valid_to": None, "pack_price": None})
+            ean = (prod.get("ean") or "").strip()
+            if op and ean:
+                try:
+                    op_rows += op_regular_rows(prod, op.prices(ean, op_since), retailers, zip_code)
+                except Exception as ex:  # noqa: BLE001  – Open Prices ist optional
+                    print(f"  Hinweis: Open Prices für '{prod['name']}' nicht erreichbar: {ex}")
             print(f"  {prod['name']}: {len(rows)} passende Angebote")
 
     stats["angebote"] = len(offer_rows)
@@ -391,6 +474,12 @@ def run(db, mg, today: dt.date | None = None) -> dict:
         # je Produkt+Händler nur den neuesten Normalpreis behalten
         dedup = {(r["product_id"], r["retailer"]): r for r in regular_rows}
         db.upsert("retail_prices", list(dedup.values()), "product_id,retailer,ext_key")
+
+    stats["normalpreise"] = len(op_rows)
+    if op_rows:
+        db.upsert("retail_prices", op_rows, "product_id,retailer,ext_key")
+    # zu alte Open-Prices-Meldungen entfernen
+    db.delete("retail_prices", {"source": "eq.openprices", "valid_from": f"lt.{(today - dt.timedelta(days=OP_MAX_AGE_DAYS)).isoformat()}"})
 
     # abgelaufene Prospekt-Angebote aufräumen (7 Tage Puffer für die Anzeige "letzte Woche")
     cutoff = (today - dt.timedelta(days=7)).isoformat()
@@ -437,17 +526,18 @@ def main() -> int:
         with open(os.path.join(here, "demo_db.json"), encoding="utf-8") as f:
             db = MemoryDB(json.load(f))
         mg = DemoMarktguru(os.path.join(here, "demo_offers.json"))
+        op = DemoOpenPrices(os.path.join(here, "demo_openprices.json"))
     else:
         url, key = os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_SERVICE_KEY", "")
         if not url or not key:
             print("FEHLER: SUPABASE_URL oder SUPABASE_SERVICE_KEY fehlt (GitHub → Settings → Secrets).")
             return 1
-        db, mg = Supabase(url, key), Marktguru()
+        db, mg, op = Supabase(url, key), Marktguru(), OpenPrices()
 
     run_row = db.insert("collector_runs", {"status": "läuft"})
     try:
-        stats = run(db, mg)
-        msg = f"{stats['konten']} Konten, {stats['produkte']} Produkte, {stats['angebote']} Angebote, {stats['fehler']} Fehler"
+        stats = run(db, mg, op=op)
+        msg = f"{stats['konten']} Konten, {stats['produkte']} Produkte, {stats['angebote']} Angebote, {stats['normalpreise']} Normalpreise, {stats['fehler']} Fehler"
         print("FERTIG:", msg)
         db.update("collector_runs", {"id": run_row["id"]},
                   {"status": "ok" if not stats["fehler"] else "teilweise", "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
